@@ -1,0 +1,996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>踢足球 - Kick the Ball Poker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+  <style>
+    @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 15px rgba(16, 185, 129, 0.4); } 50% { box-shadow: 0 0 30px rgba(16, 185, 129, 0.7); } }
+    .pulse-glow { animation: pulse-glow 1.5s ease-in-out infinite; }
+    body { font-family: system-ui, -apple-system, sans-serif; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+<div id="app" class="min-h-screen"></div>
+<div id="status" class="fixed bottom-4 left-4 right-4 text-sm text-white bg-black/50 px-3 py-2 rounded-lg"></div>
+
+<script>
+// ===== FIREBASE CONFIG =====
+const firebaseConfig = {
+  databaseURL: "https://poker-d35d3-default-rtdb.firebaseio.com"
+};
+
+let db;
+try {
+  firebase.initializeApp(firebaseConfig);
+  db = firebase.database();
+  document.getElementById('status').textContent = '✓ Firebase connected';
+} catch(e) {
+  document.getElementById('status').textContent = '✗ Firebase error: ' + e.message;
+}
+
+// ===== POKER LOGIC =====
+const RANKS = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
+const SUITS = ['♠','♥','♦','♣'];
+const HAND_NAMES = {10:'Royal Flush',9:'Straight Flush',8:'Four of a Kind',7:'Full House',6:'Flush',5:'Straight',4:'Three of a Kind',3:'Two Pair',2:'One Pair',1:'High Card',0:'Incomplete'};
+
+const getRankValue = r => RANKS.indexOf(r);
+const createDeck = () => { let d=[]; SUITS.forEach(s=>RANKS.forEach(r=>d.push({rank:r,suit:s,id:r+s}))); return d; };
+const shuffleDeck = d => { let s=[...d]; for(let i=s.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[s[i],s[j]]=[s[j],s[i]];} return s; };
+const combinations = (a,k) => { if(k===0)return[[]]; if(!a.length)return[]; let[f,...r]=a; return[...combinations(r,k-1).map(c=>[f,...c]),...combinations(r,k)]; };
+
+function evaluateHand(cards) {
+  if(cards.length!==5)return null;
+  let ranks=cards.map(c=>getRankValue(c.rank)).sort((a,b)=>b-a);
+  let suits=cards.map(c=>c.suit);
+  let isFlush=suits.every(s=>s===suits[0]);
+  let unique=[...new Set(ranks)].sort((a,b)=>b-a);
+  let isStraight=unique.length===5&&(unique[0]-unique[4]===4||(unique[0]===12&&unique[1]===3));
+  let counts={};ranks.forEach(r=>counts[r]=(counts[r]||0)+1);
+  let c=Object.values(counts).sort((a,b)=>b-a);
+  let hr,tb=[];
+  if(isFlush&&isStraight){hr=ranks[0]===12&&ranks[1]===11?10:9;tb=[ranks[0]===12&&ranks[1]===3?3:ranks[0]];}
+  else if(c[0]===4){hr=8;tb=[+Object.keys(counts).find(k=>counts[k]===4),+Object.keys(counts).find(k=>counts[k]===1)];}
+  else if(c[0]===3&&c[1]===2){hr=7;tb=[+Object.keys(counts).find(k=>counts[k]===3),+Object.keys(counts).find(k=>counts[k]===2)];}
+  else if(isFlush){hr=6;tb=ranks;}
+  else if(isStraight){hr=5;tb=[ranks[0]===12&&ranks[1]===3?3:ranks[0]];}
+  else if(c[0]===3){hr=4;tb=[+Object.keys(counts).find(k=>counts[k]===3),...Object.keys(counts).filter(k=>counts[k]===1).map(Number).sort((a,b)=>b-a)];}
+  else if(c[0]===2&&c[1]===2){hr=3;let p=Object.keys(counts).filter(k=>counts[k]===2).map(Number).sort((a,b)=>b-a);tb=[...p,+Object.keys(counts).find(k=>counts[k]===1)];}
+  else if(c[0]===2){hr=2;tb=[+Object.keys(counts).find(k=>counts[k]===2),...Object.keys(counts).filter(k=>counts[k]===1).map(Number).sort((a,b)=>b-a)];}
+  else{hr=1;tb=ranks;}
+  return {rank:hr,name:HAND_NAMES[hr],tiebreakers:tb,cards};
+}
+
+function findBestHand(cards) {
+  if(!cards || cards.length === 0) return {rank:0, name:'No cards', tiebreakers:[], cards:[], isIncomplete:true};
+  
+  // For less than 5 cards, we still evaluate what we have
+  if(cards.length < 5) {
+    const ranks = cards.map(c => getRankValue(c.rank)).sort((a,b) => b-a);
+    const counts = {};
+    ranks.forEach(r => counts[r] = (counts[r]||0) + 1);
+    const c = Object.values(counts).sort((a,b) => b-a);
+    
+    let hr, tb = [], name;
+    
+    if(c[0] === 4) {
+      hr = 8; // Four of a kind
+      name = 'Four of a Kind';
+      tb = [+Object.keys(counts).find(k=>counts[k]===4)];
+    } else if(c[0] === 3 && c[1] === 2) {
+      hr = 7; // Full house
+      name = 'Full House';
+      tb = [+Object.keys(counts).find(k=>counts[k]===3), +Object.keys(counts).find(k=>counts[k]===2)];
+    } else if(c[0] === 3) {
+      hr = 4; // Three of a kind
+      name = 'Three of a Kind';
+      tb = [+Object.keys(counts).find(k=>counts[k]===3), ...Object.keys(counts).filter(k=>counts[k]===1).map(Number).sort((a,b)=>b-a)];
+    } else if(c[0] === 2 && c[1] === 2) {
+      hr = 3; // Two pair
+      name = 'Two Pair';
+      const pairs = Object.keys(counts).filter(k=>counts[k]===2).map(Number).sort((a,b)=>b-a);
+      tb = [...pairs, ...Object.keys(counts).filter(k=>counts[k]===1).map(Number).sort((a,b)=>b-a)];
+    } else if(c[0] === 2) {
+      hr = 2; // One pair
+      name = 'One Pair';
+      tb = [+Object.keys(counts).find(k=>counts[k]===2), ...Object.keys(counts).filter(k=>counts[k]===1).map(Number).sort((a,b)=>b-a)];
+    } else {
+      hr = 1; // High card
+      name = 'High Card';
+      tb = ranks;
+    }
+    
+    return {rank: hr, name: name, tiebreakers: tb, cards: cards, isIncomplete: true, cardCount: cards.length};
+  }
+  
+  // For 5+ cards, find best 5-card combination
+  let best = null;
+  for(let combo of combinations(cards, 5)) {
+    let h = evaluateHand(combo);
+    if(!best || compareHands(h, best) > 0) best = h;
+  }
+  return best;
+}
+
+function compareHands(h1, h2) {
+  // First compare by hand rank (pair beats high card, etc.)
+  if(h1.rank !== h2.rank) return h1.rank - h2.rank;
+  
+  // Same rank, compare tiebreakers
+  for(let i = 0; i < Math.max(h1.tiebreakers.length, h2.tiebreakers.length); i++) {
+    const t1 = h1.tiebreakers[i] !== undefined ? h1.tiebreakers[i] : -1;
+    const t2 = h2.tiebreakers[i] !== undefined ? h2.tiebreakers[i] : -1;
+    if(t1 !== t2) return t1 - t2;
+  }
+  
+  return 0;
+}
+
+function beatsPreviousHand(pCards, target) {
+  if(!pCards || pCards.length === 0 || !target) return false;
+  
+  const pBest = findBestHand(pCards);
+  
+  // Single card target (initial flip from deck)
+  if(target.isSingleCard) {
+    // Any pair or better beats a single card
+    if(pBest.rank >= 2) return true;
+    // Otherwise need higher card
+    return Math.max(...pCards.map(c => getRankValue(c.rank))) > target.tiebreakers[0];
+  }
+  
+  // Compare hand ranks first - a pair beats high card regardless of card count
+  if(pBest.rank > target.rank) return true;
+  if(pBest.rank < target.rank) return false;
+  
+  // Same rank, compare tiebreakers
+  for(let i = 0; i < Math.max(pBest.tiebreakers.length, target.tiebreakers.length); i++) {
+    const t1 = pBest.tiebreakers[i] !== undefined ? pBest.tiebreakers[i] : -1;
+    const t2 = target.tiebreakers[i] !== undefined ? target.tiebreakers[i] : -1;
+    if(t1 > t2) return true;
+    if(t1 < t2) return false;
+  }
+  
+  return false; // Equal hands don't beat
+}
+
+const rollDice = n => { let d=[]; for(let i=0;i<n;i++)d.push(Math.floor(Math.random()*6)+1); return {dice:d,total:d.reduce((a,b)=>a+b,0)}; };
+
+// ===== STATE =====
+let state = { phase:'home', myId:null, myName:'', roomCode:'', isHost:false, game:null };
+let gameRef = null;
+
+// ===== FIREBASE FUNCTIONS =====
+function genId() { return 'p' + Math.random().toString(36).substr(2,8); }
+function genRoom() { return Math.random().toString(36).substr(2,6).toUpperCase(); }
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+  console.log(msg);
+}
+
+async function createRoom() {
+  const name = document.getElementById('nameInput').value.trim();
+  if(!name) { alert('Enter your name'); return; }
+  
+  state.myId = genId();
+  state.myName = name;
+  state.roomCode = genRoom();
+  state.isHost = true;
+  
+  setStatus('Creating room ' + state.roomCode + '...');
+  
+  const gameData = {
+    phase: 'lobby',
+    hostId: state.myId,
+    numDice: 1,
+    dealerIndex: 0,
+    currentPlayerIndex: 0,
+    players: {},
+    targetHand: null,
+    targetSetBy: 'Deck',
+    diceRoll: null,
+    betAmount: 0,
+    pot: 0,
+    winner: null,
+    history: [],
+    deck: [],
+    created: Date.now()
+  };
+  
+  // Add host as first player
+  gameData.players[state.myId] = { 
+    id: state.myId, 
+    name: name, 
+    flippedCards: [], 
+    hiddenCards: [], 
+    hiddenCount: 11, 
+    isEliminated: false, 
+    order: 0 
+  };
+  
+  try {
+    gameRef = db.ref('games/' + state.roomCode);
+    await gameRef.set(gameData);
+    setStatus('Room created: ' + state.roomCode);
+    subscribe();
+  } catch(e) {
+    setStatus('Error creating room: ' + e.message);
+    alert('Error creating room: ' + e.message);
+  }
+}
+
+async function joinRoom() {
+  const name = document.getElementById('nameInput').value.trim();
+  const code = document.getElementById('roomInput').value.trim().toUpperCase();
+  if(!name) { alert('Enter your name'); return; }
+  if(!code) { alert('Enter room code'); return; }
+  
+  state.myId = genId();
+  state.myName = name;
+  state.roomCode = code;
+  state.isHost = false;
+  
+  setStatus('Joining room ' + code + '...');
+  
+  try {
+    gameRef = db.ref('games/' + code);
+    
+    // Use once() instead of get() for better compatibility
+    const snapshot = await new Promise((resolve, reject) => {
+      gameRef.once('value', resolve, reject);
+    });
+    
+    if(!snapshot.exists()) { 
+      setStatus('Room not found: ' + code);
+      alert('Room not found. Make sure the code is correct.'); 
+      return; 
+    }
+    
+    const game = snapshot.val();
+    setStatus('Found room, phase: ' + game.phase);
+    
+    if(game.phase !== 'lobby') { 
+      alert('Game already started'); 
+      return; 
+    }
+    
+    const playerCount = Object.keys(game.players || {}).length;
+    if(playerCount >= 4) { 
+      alert('Room is full'); 
+      return; 
+    }
+    
+    // Add player to the game
+    await gameRef.child('players/' + state.myId).set({
+      id: state.myId, 
+      name: name, 
+      flippedCards: [], 
+      hiddenCards: [], 
+      hiddenCount: 11, 
+      isEliminated: false, 
+      order: playerCount
+    });
+    
+    setStatus('Joined room ' + code);
+    subscribe();
+  } catch(e) {
+    setStatus('Error joining: ' + e.message);
+    alert('Error joining room: ' + e.message);
+  }
+}
+
+function subscribe() {
+  setStatus('Subscribing to updates...');
+  gameRef.on('value', snapshot => {
+    if(snapshot.exists()) {
+      const game = snapshot.val();
+      const oldPhase = state.game?.phase;
+      state.game = game;
+      state.phase = game.phase;
+      setStatus('Room: ' + state.roomCode + ' | Phase: ' + game.phase + ' | Players: ' + Object.keys(game.players||{}).length);
+      console.log('Firebase update received:', game.phase, game);
+      
+      // Debug: alert when phase changes
+      if(oldPhase && oldPhase !== game.phase) {
+        console.log('PHASE CHANGED from', oldPhase, 'to', game.phase);
+      }
+      
+      render();
+    } else {
+      setStatus('Room data not found');
+    }
+  }, error => {
+    setStatus('Subscription error: ' + error.message);
+  });
+}
+
+async function updateGame(updates) {
+  try {
+    await gameRef.update(updates);
+  } catch(e) {
+    setStatus('Update error: ' + e.message);
+  }
+}
+
+async function setDice(n) {
+  await updateGame({ numDice: n });
+}
+
+// Propose a dice change - needs all players to approve
+async function proposeDiceChange(n) {
+  const game = state.game;
+  if(n === game.numDice) {
+    // Cancel pending change if clicking current dice
+    await updateGame({ pendingDiceChange: null, diceApprovals: {} });
+  } else {
+    // Propose new dice count, proposer auto-approves
+    await updateGame({ 
+      pendingDiceChange: n, 
+      diceApprovals: { [state.myId]: true } 
+    });
+  }
+}
+
+// Approve a pending dice change
+async function approveDiceChange() {
+  const game = state.game;
+  const approvals = { ...(game.diceApprovals || {}), [state.myId]: true };
+  const players = Object.values(game.players);
+  
+  // Check if all approved
+  const allApproved = players.every(p => approvals[p.id]);
+  
+  if(allApproved) {
+    // Apply the change
+    await updateGame({ 
+      numDice: game.pendingDiceChange, 
+      pendingDiceChange: null, 
+      diceApprovals: {} 
+    });
+  } else {
+    // Just record approval
+    await updateGame({ diceApprovals: approvals });
+  }
+}
+
+async function startGame() {
+  // Go to rolling phase where dealer picks dice and rolls
+  await updateGame({ 
+    phase: 'rolling',
+    diceRoll: null,
+    betAmount: 0,
+    pot: 0,
+    winner: null,
+    history: [],
+    pendingDiceChange: null,
+    diceApprovals: {}
+  });
+}
+
+async function doRollDice() {
+  const game = state.game;
+  const numDice = game.numDice || 1;
+  const roll = rollDice(numDice);
+  const playerCount = Object.keys(game.players).length;
+  const betAmount = roll.total;
+  const pot = betAmount * playerCount; // Pot = bet × number of players
+  const history = [...(game.history||[]), { type:'dice', name:state.myName, dice:roll.dice, total:roll.total }];
+  await updateGame({ diceRoll: roll, betAmount: betAmount, pot: pot, history });
+}
+
+async function doFlipInitial() {
+  const game = state.game;
+  let deck = shuffleDeck(createDeck());
+  const players = JSON.parse(JSON.stringify(game.players)); // Deep clone
+  const playerIds = Object.keys(players).sort((a,b) => players[a].order - players[b].order);
+  
+  // Deal cards
+  playerIds.forEach(pid => {
+    const hand = deck.splice(0, 11);
+    players[pid].hiddenCards = hand;
+    players[pid].flippedCards = [];
+    players[pid].hiddenCount = 11;
+    players[pid].isEliminated = false;
+  });
+  
+  const initial = deck.shift();
+  const targetHand = { rank:1, name:'High Card '+initial.rank, tiebreakers:[getRankValue(initial.rank)], cards:[initial], isSingleCard:true };
+  const history = [...(game.history||[]), { type:'initial', card:initial, name:state.myName }];
+  
+  await updateGame({ 
+    phase: 'playing', 
+    players, 
+    deck, 
+    targetHand, 
+    targetSetBy: 'Deck',
+    currentPlayerIndex: game.dealerIndex,
+    history,
+    initialCard: initial  // Store the initial card separately so we always know it's used
+  });
+}
+
+async function doFlipCard() {
+  const game = state.game;
+  const players = JSON.parse(JSON.stringify(game.players));
+  const me = players[state.myId];
+  if(!me.hiddenCards || me.hiddenCards.length === 0) return;
+  
+  const card = me.hiddenCards.shift();
+  me.flippedCards = [...(me.flippedCards||[]), card];
+  me.hiddenCount = me.hiddenCards.length;
+  
+  const myBest = findBestHand(me.flippedCards);
+  const beats = beatsPreviousHand(me.flippedCards, game.targetHand);
+  
+  // Helper function to update scores - winner gains pot, losers lose bet
+  const updateScoresForWinner = (winnerId) => {
+    const scores = { ...(game.scores || {}) };
+    const betAmount = game.betAmount || 0;
+    const playerList = Object.values(players);
+    
+    playerList.forEach(p => {
+      if(p.id === winnerId) {
+        // Winner gains the pot (which is bet × player count, so net gain is bet × (players-1))
+        scores[p.id] = (scores[p.id] || 0) + (betAmount * (playerList.length - 1));
+      } else {
+        // Losers lose their bet
+        scores[p.id] = (scores[p.id] || 0) - betAmount;
+      }
+    });
+    
+    return scores;
+  };
+  
+  // Check if player now beats the target - auto advance to next player
+  if(beats) {
+    const history = [...(game.history||[]), { type:'beat', name:state.myName, hand:myBest.name, cards:me.flippedCards.length }];
+    
+    // Find next active player who still has cards
+    const playerIds = Object.keys(players).sort((a,b) => players[a].order - players[b].order);
+    let next = game.currentPlayerIndex;
+    let checked = 0;
+    
+    do {
+      next = (next + 1) % playerIds.length;
+      checked++;
+      const nextPlayer = players[playerIds[next]];
+      // Skip eliminated players and players with no cards left
+      if(!nextPlayer.isEliminated && nextPlayer.hiddenCount > 0) break;
+    } while(checked < playerIds.length);
+    
+    // Check if everyone else is out of cards or eliminated
+    const playersWithCards = Object.values(players).filter(p => !p.isEliminated && p.hiddenCount > 0 && p.id !== state.myId);
+    
+    if(playersWithCards.length === 0) {
+      // I'm the winner - I beat the target and no one else can play
+      history.push({ type:'winner', name:state.myName, pot:game.pot });
+      
+      const scores = updateScoresForWinner(state.myId);
+      
+      await updateGame({ 
+        players, 
+        targetHand: myBest,
+        targetSetBy: state.myName,
+        history, 
+        phase:'finished', 
+        winner: state.myId, 
+        scores,
+        dealerIndex: (game.dealerIndex + 1) % playerIds.length 
+      });
+      return;
+    }
+    
+    await updateGame({ 
+      players, 
+      targetHand: myBest, 
+      targetSetBy: state.myName, 
+      currentPlayerIndex: next,
+      history 
+    });
+    return;
+  }
+  
+  // Check if lost (ran out of cards without beating target)
+  if(me.hiddenCount === 0 && !beats) {
+    me.isEliminated = true;
+    const history = [...(game.history||[]), { type:'eliminated', name:state.myName, reason:'ran out of cards' }];
+    const activePlayers = Object.values(players).filter(p => !p.isEliminated);
+    
+    if(activePlayers.length === 1) {
+      // Last player standing wins
+      const winner = activePlayers[0];
+      history.push({ type:'winner', name:winner.name, pot:game.pot });
+      
+      const scores = updateScoresForWinner(winner.id);
+      
+      const playerIds = Object.keys(players).sort((a,b) => players[a].order - players[b].order);
+      await updateGame({ players, history, phase:'finished', winner:winner.id, scores, dealerIndex:(game.dealerIndex+1)%playerIds.length });
+    } else if(activePlayers.length === 0) {
+      // Everyone eliminated - last person to set target wins
+      const targetSetter = Object.values(players).find(p => p.name === game.targetSetBy);
+      if(targetSetter) {
+        history.push({ type:'winner', name:targetSetter.name, pot:game.pot });
+        const scores = updateScoresForWinner(targetSetter.id);
+        const playerIds = Object.keys(players).sort((a,b) => players[a].order - players[b].order);
+        await updateGame({ players, history, phase:'finished', winner:targetSetter.id, scores, dealerIndex:(game.dealerIndex+1)%playerIds.length });
+      }
+    } else {
+      // Find next active player with cards
+      const playerIds = Object.keys(players).sort((a,b) => players[a].order - players[b].order);
+      let next = game.currentPlayerIndex;
+      let checked = 0;
+      
+      do {
+        next = (next + 1) % playerIds.length;
+        checked++;
+        const nextPlayer = players[playerIds[next]];
+        if(!nextPlayer.isEliminated && nextPlayer.hiddenCount > 0) break;
+      } while(checked < playerIds.length);
+      
+      await updateGame({ players, history, currentPlayerIndex: next });
+    }
+    return;
+  }
+  
+  // Just update the flipped card, player keeps flipping
+  await updateGame({ players });
+}
+
+async function doPlayAgain() {
+  const game = state.game;
+  const players = JSON.parse(JSON.stringify(game.players));
+  Object.values(players).forEach(p => {
+    p.flippedCards = [];
+    p.hiddenCards = [];
+    p.hiddenCount = 11;
+    p.isEliminated = false;
+  });
+  // Preserve scores when going back to lobby
+  await updateGame({ 
+    phase: 'rolling', // Go to rolling phase for new round
+    players, 
+    targetHand: null, 
+    diceRoll: null, 
+    winner: null, 
+    history: [],
+    pot: 0,
+    betAmount: 0
+    // scores are preserved (not reset)
+  });
+}
+
+// ===== RENDER =====
+function renderCard(card, small=false, hidden=false) {
+  // Larger card sizes
+  const sz = small ? 'w-12 h-16 text-sm' : 'w-16 h-24 text-base';
+  const clr = (card?.suit==='♥'||card?.suit==='♦') ? 'text-red-600' : 'text-gray-900';
+  if(hidden) return `<div class="${sz} rounded-lg bg-gradient-to-br from-indigo-800 to-purple-900 border-2 border-indigo-500/30 flex items-center justify-center text-lg">🎴</div>`;
+  return `<div class="${sz} rounded-lg bg-white shadow-lg flex flex-col items-center justify-center ${clr} border border-gray-200"><span class="font-bold text-lg">${card?.rank||'?'}</span><span class="text-lg">${card?.suit||'?'}</span></div>`;
+}
+
+// Calculate what cards would help - considering what's already used
+function getHelpfulCards(myCards, targetHand, gameState) {
+  if(!targetHand) return null;
+  
+  // myCards can be empty (before first flip)
+  const cards = myCards || [];
+  
+  // Build set of used cards (all visible cards)
+  const usedCards = new Set();
+  
+  // Add the INITIAL card from deck - this is stored separately in gameState.initialCard
+  if(gameState?.initialCard) {
+    const c = gameState.initialCard;
+    if(c.rank && c.suit) {
+      usedCards.add(c.rank + c.suit);
+    }
+  }
+  
+  // Add all players' flipped cards
+  if(gameState?.players) {
+    Object.values(gameState.players).forEach(p => {
+      if(p.flippedCards && Array.isArray(p.flippedCards)) {
+        p.flippedCards.forEach(c => {
+          if(c && c.rank && c.suit) {
+            usedCards.add(c.rank + c.suit);
+          }
+        });
+      }
+    });
+  }
+  
+  // Get current hand evaluation (may be empty/no cards)
+  const currentBest = findBestHand(cards);
+  const currentlyBeatsTarget = cards.length > 0 && beatsPreviousHand(cards, targetHand);
+  
+  // If already beats target, no need to show helpful cards
+  if(currentlyBeatsTarget) return null;
+  
+  // Find all available cards that would help BEAT THE TARGET
+  const improvements = [];
+  
+  SUITS.forEach(suit => {
+    RANKS.forEach(rank => {
+      const cardId = rank + suit;
+      if(usedCards.has(cardId)) return; // Card already used
+      
+      // Simulate adding this card
+      const newCard = {rank, suit, id: cardId};
+      const simCards = [...cards, newCard];
+      const simBest = findBestHand(simCards);
+      
+      // Check if this card would make us BEAT THE TARGET
+      if(beatsPreviousHand(simCards, targetHand)) {
+        // Determine what kind of hand this creates
+        const improvement = getImprovementType(currentBest, simBest, cards, newCard, targetHand);
+        
+        improvements.push({
+          card: newCard,
+          rank: rank,
+          suit: suit,
+          resultRank: simBest.rank,
+          resultName: simBest.name,
+          improvement: improvement
+        });
+      }
+    });
+  });
+  
+  return improvements.length > 0 ? improvements : null;
+}
+
+function getImprovementType(currentBest, newBest, myCards, newCard, targetHand) {
+  const currentRank = currentBest.rank;
+  const newRank = newBest.rank;
+  const targetRank = targetHand.rank;
+  
+  // Count ranks in current hand
+  const rankCounts = {};
+  myCards.forEach(c => rankCounts[c.rank] = (rankCounts[c.rank]||0) + 1);
+  
+  // If new hand is same rank as target, it's a higher version
+  if(newRank === targetRank) {
+    if(newRank === 1) return 'Higher Card';
+    if(newRank === 2) return 'Higher Pair';
+    if(newRank === 3) return 'Higher Two Pair';
+    if(newRank === 4) return 'Higher Three of a Kind';
+    if(newRank === 5) return 'Higher Straight';
+    if(newRank === 6) return 'Higher Flush';
+    if(newRank === 7) return 'Higher Full House';
+    return newBest.name;
+  }
+  
+  // Otherwise it's a better hand type
+  if(newRank === 10) return 'Royal Flush';
+  if(newRank === 9) return 'Straight Flush';
+  if(newRank === 8) return 'Four of a Kind';
+  if(newRank === 7) return 'Full House';
+  if(newRank === 6) return 'Flush';
+  if(newRank === 5) return 'Straight';
+  if(newRank === 4) return 'Three of a Kind';
+  if(newRank === 3) return 'Two Pair';
+  if(newRank === 2) return 'Pair';
+  if(newRank === 1) return 'High Card';
+  
+  return newBest.name;
+}
+
+function renderHelpfulCards(myCards, targetHand, gameState) {
+  const helpful = getHelpfulCards(myCards, targetHand, gameState);
+  if(!helpful || helpful.length === 0) {
+    return '<div class="mt-3 p-3 rounded-xl bg-yellow-500/20 border border-yellow-500/30"><div class="text-yellow-400 text-sm">🎯 No helpful cards available - keep flipping!</div></div>';
+  }
+  
+  // Group by improvement type
+  const grouped = {};
+  helpful.forEach(h => {
+    const key = h.improvement || 'Improves hand';
+    if(!grouped[key]) grouped[key] = [];
+    grouped[key].push(h.card);
+  });
+  
+  // Sort groups by hand rank (best first)
+  const rankOrder = ['Royal Flush', 'Straight Flush', 'Four of a Kind', 'Full House', 'Flush', 'Straight', 'Three of a Kind', 'Two Pair', 'Pair'];
+  const sortedKeys = Object.keys(grouped).sort((a, b) => {
+    const aIdx = rankOrder.findIndex(r => a.includes(r));
+    const bIdx = rankOrder.findIndex(r => b.includes(r));
+    if(aIdx === -1 && bIdx === -1) return 0;
+    if(aIdx === -1) return 1;
+    if(bIdx === -1) return -1;
+    return aIdx - bIdx;
+  });
+  
+  let html = '<div class="mt-3 p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/30">';
+  html += '<div class="text-emerald-400 text-sm font-bold mb-3">🎯 听牌 - Cards that help:</div>';
+  
+  sortedKeys.forEach(improvement => {
+    const cards = grouped[improvement];
+    html += `<div class="mb-3">`;
+    html += `<div class="text-white/70 text-xs mb-2">→ ${improvement} (${cards.length} cards):</div>`;
+    html += `<div class="flex gap-1 flex-wrap">`;
+    
+    // Render actual cards
+    cards.forEach(card => {
+      const clr = (card.suit === '♥' || card.suit === '♦') ? 'text-red-500' : 'text-gray-800';
+      html += `<div class="w-10 h-14 rounded bg-white shadow flex flex-col items-center justify-center ${clr} border border-emerald-400">
+        <span class="font-bold text-sm">${card.rank}</span>
+        <span class="text-sm">${card.suit}</span>
+      </div>`;
+    });
+    
+    html += `</div></div>`;
+  });
+  
+  // Count total helpful cards
+  const totalCards = helpful.length;
+  html += `<div class="text-emerald-400/70 text-xs mt-2">Total: ${totalCards} helpful card${totalCards > 1 ? 's' : ''} remaining</div>`;
+  
+  html += '</div>';
+  return html;
+}
+
+function renderDice(v) {
+  const dots = {1:[[1,1]],2:[[0,0],[2,2]],3:[[0,0],[1,1],[2,2]],4:[[0,0],[0,2],[2,0],[2,2]],5:[[0,0],[0,2],[1,1],[2,0],[2,2]],6:[[0,0],[0,1],[0,2],[2,0],[2,1],[2,2]]};
+  let g='';for(let r=0;r<3;r++)for(let c=0;c<3;c++){let has=dots[v]?.some(([dr,dc])=>dr===r&&dc===c);g+=`<div class="w-2 h-2 rounded-full ${has?'bg-slate-800':''}"></div>`;}
+  return `<div class="w-12 h-12 bg-white rounded-xl shadow flex items-center justify-center"><div class="grid grid-cols-3 gap-0.5 p-1">${g}</div></div>`;
+}
+
+function render() {
+  const app = document.getElementById('app');
+  const g = state.game;
+  
+  // Get the current phase from game state
+  const currentPhase = g ? g.phase : 'home';
+  
+  // Update status bar with current phase being rendered
+  const statusEl = document.getElementById('status');
+  if(statusEl && g) {
+    statusEl.textContent = 'Room: ' + state.roomCode + ' | Rendering: ' + currentPhase + ' | Players: ' + Object.keys(g.players||{}).length;
+  }
+  
+  console.log('=== RENDER START ===', 'phase:', currentPhase, 'game exists:', !!g);
+  
+  // HOME - only show if no game data
+  if(!g) {
+    console.log('Rendering HOME (no game)');
+    app.innerHTML = `
+      <div class="min-h-screen flex items-center justify-center p-4">
+        <div class="max-w-md w-full">
+          <div class="text-center mb-10">
+            <h1 class="text-5xl font-black bg-gradient-to-r from-amber-200 via-yellow-300 to-amber-200 bg-clip-text text-transparent mb-2">踢足球</h1>
+            <p class="text-white/60">Kick the Ball • Poker</p>
+            <div class="flex justify-center gap-2 mt-3 text-2xl opacity-70">♠ ♥ ♦ ♣</div>
+          </div>
+          <input id="nameInput" type="text" placeholder="Your name" class="w-full px-4 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-white/40 mb-4 focus:outline-none focus:border-amber-400">
+          <button onclick="createRoom()" class="w-full py-4 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-black font-bold text-lg mb-4">Create Room</button>
+          <div class="flex items-center gap-2 mb-4"><div class="flex-1 h-px bg-white/20"></div><span class="text-white/40 text-sm">or join</span><div class="flex-1 h-px bg-white/20"></div></div>
+          <div class="flex gap-2">
+            <input id="roomInput" type="text" placeholder="Room code" maxlength="6" class="flex-1 px-4 py-3 rounded-xl bg-white/10 border border-white/20 text-white placeholder-white/40 uppercase tracking-widest focus:outline-none">
+            <button onclick="joinRoom()" class="px-6 py-3 rounded-xl bg-emerald-500 text-white font-bold">Join</button>
+          </div>
+          <div class="mt-8 p-4 rounded-xl bg-white/5 border border-white/10 text-white/50 text-sm">
+            <p class="font-semibold text-white/70 mb-2">How to play:</p>
+            <ul class="space-y-1"><li>• 2-4 players, 11 cards each</li><li>• Dealer rolls dice to set bet</li><li>• Flip cards to beat target</li><li>• Even 1 card can win!</li><li>• Last standing wins pot!</li></ul>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+  
+  const players = g.players ? Object.values(g.players).sort((a,b)=>(a.order||0)-(b.order||0)) : [];
+  const playerIds = players.map(p=>p.id);
+  const me = g.players?.[state.myId];
+  const isHost = g.hostId === state.myId;
+  const dealerIndex = g.dealerIndex || 0;
+  const dealerId = playerIds[dealerIndex] || playerIds[0];
+  const currentId = playerIds[g.currentPlayerIndex] || playerIds[0];
+  const isDealer = dealerId === state.myId;
+  const isMyTurn = currentId === state.myId;
+  
+  console.log('Player info - myId:', state.myId, 'dealerId:', dealerId, 'isDealer:', isDealer, 'isHost:', isHost);
+
+  // ROLLING - check this BEFORE lobby
+  if(currentPhase === 'rolling') {
+    console.log('=== RENDERING ROLLING === isDealer:', isDealer, 'dealerId:', dealerId, 'myId:', state.myId);
+    const hasRolled = g.diceRoll !== null && g.diceRoll !== undefined;
+    const dealerName = players[dealerIndex]?.name || 'Dealer';
+    const numDice = g.numDice || 1;
+    const scores = g.scores || {};
+    
+    // Only the current dealer can roll (not always host)
+    const canRoll = isDealer;
+    
+    // Dice change approval system
+    const pendingDice = g.pendingDiceChange;
+    const diceApprovals = g.diceApprovals || {};
+    const allApproved = pendingDice && players.every(p => diceApprovals[p.id]);
+    
+    app.innerHTML = `
+      <div class="min-h-screen flex items-center justify-center p-4">
+        <div class="max-w-md w-full text-center">
+          <h2 class="text-3xl font-bold text-white mb-2">🎲 Roll the Dice!</h2>
+          <p class="text-white/60 mb-4">${canRoll ? "You're the dealer! Pick dice count and roll." : `Waiting for ${dealerName}...`}</p>
+          
+          <!-- Scoreboard always visible -->
+          <div class="mb-4 p-3 rounded-xl bg-white/5 border border-white/10 text-left">
+            <div class="text-amber-400 text-sm font-bold mb-2">🏆 Scoreboard</div>
+            ${players.map(p=>`<div class="flex justify-between py-1"><span class="text-white text-sm">${p.name}${p.id===state.myId?' (You)':''}${playerIds[dealerIndex]===p.id?' 🎲':''}</span><span class="text-amber-400 font-bold">$${scores[p.id]||0}</span></div>`).join('')}
+          </div>
+          
+          <!-- Dice selection - only dealer can propose change -->
+          ${!hasRolled ? `
+            <div class="mb-6 p-4 rounded-2xl bg-white/5 border border-white/10">
+              <div class="flex justify-between mb-3"><span class="text-white/70">Dice Count</span><span class="text-amber-400 text-sm">Bet per player: $${numDice} - $${numDice*6}</span></div>
+              <div class="flex gap-2 justify-center mb-3">${[1,2,3,4,5,6].map(n=>`<button onclick="proposeDiceChange(${n})" class="w-10 h-10 rounded-lg font-bold ${numDice===n?'bg-amber-400 text-black':'bg-white/10 text-white hover:bg-white/20'} ${pendingDice===n?'ring-2 ring-emerald-400':''}">${n}</button>`).join('')}</div>
+              
+              ${pendingDice ? `
+                <div class="mt-3 p-2 rounded-lg bg-emerald-500/20 border border-emerald-500/30">
+                  <div class="text-emerald-400 text-sm mb-2">Change to ${pendingDice} dice? (All must approve)</div>
+                  <div class="flex justify-center gap-2 flex-wrap">
+                    ${players.map(p=>`<span class="px-2 py-1 rounded text-xs ${diceApprovals[p.id]?'bg-emerald-500 text-white':'bg-white/10 text-white/50'}">${p.name} ${diceApprovals[p.id]?'✓':'...'}</span>`).join('')}
+                  </div>
+                  ${!diceApprovals[state.myId] ? `<button onclick="approveDiceChange()" class="mt-2 px-4 py-2 rounded-lg bg-emerald-500 text-white font-bold text-sm">Approve</button>` : ''}
+                </div>
+              ` : ''}
+            </div>
+          ` : ''}
+          
+          <div class="flex justify-center gap-3 mb-8">${hasRolled && g.diceRoll && g.diceRoll.dice ? g.diceRoll.dice.map(v=>renderDice(v)).join('') : Array(numDice).fill(0).map(()=>renderDice(1)).join('')}</div>
+          
+          ${hasRolled ? `<div class="mb-8 p-4 rounded-2xl bg-amber-500/20 border border-amber-400/50"><div class="text-4xl font-bold text-amber-400 mb-1">$${g.pot}</div><div class="text-white/60">Pot (${players.length} × $${g.betAmount})</div></div>` : ''}
+          
+          ${canRoll && !hasRolled ? `<button onclick="doRollDice()" class="px-8 py-4 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-black font-bold text-lg">🎲 Roll Dice</button>` : ''}
+          ${canRoll && hasRolled ? `<button onclick="doFlipInitial()" class="px-8 py-4 rounded-xl bg-gradient-to-r from-emerald-400 to-cyan-500 text-black font-bold text-lg">🎴 Deal Cards & Start</button>` : ''}
+          ${!canRoll && !hasRolled ? `<div class="text-white/50 p-4">Waiting for ${dealerName} to roll...</div>` : ''}
+          ${!canRoll && hasRolled ? `<div class="text-white/50 p-4">Waiting for ${dealerName} to deal...</div>` : ''}
+        </div>
+      </div>`;
+    return;
+  }
+  
+  // LOBBY
+  if(currentPhase === 'lobby') {
+    console.log('=== RENDERING LOBBY ===');
+    const canStart = players.length >= 2;
+    const scores = g.scores || {};
+    const hasScores = Object.keys(scores).length > 0;
+    
+    app.innerHTML = `
+      <div class="min-h-screen flex items-center justify-center p-4">
+        <div class="max-w-lg w-full">
+          <div class="text-center mb-6">
+            <h2 class="text-2xl font-bold text-white mb-2">Waiting Room</h2>
+            <div class="inline-block px-4 py-2 rounded-full bg-white/10"><span class="text-white/50 text-sm">Room: </span><span class="text-amber-400 font-mono text-xl">${state.roomCode}</span></div>
+          </div>
+          
+          ${hasScores ? `
+          <div class="mb-4 p-4 rounded-2xl bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-400/30">
+            <div class="text-amber-400 font-bold mb-3">🏆 Scoreboard</div>
+            <div class="space-y-2">
+              ${players.map(p => `
+                <div class="flex items-center justify-between p-2 rounded-lg bg-black/20">
+                  <span class="text-white">${p.name}${p.id===state.myId?' (You)':''}</span>
+                  <span class="text-amber-400 font-bold">$${scores[p.id] || 0}</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          ` : `
+          <div class="mb-4 p-4 rounded-2xl bg-white/5 border border-white/10">
+            <div class="text-white/50 font-bold mb-3">🏆 Scoreboard</div>
+            <div class="space-y-2">
+              ${players.map(p => `
+                <div class="flex items-center justify-between p-2 rounded-lg bg-black/20">
+                  <span class="text-white">${p.name}${p.id===state.myId?' (You)':''}</span>
+                  <span class="text-white/50 font-bold">$0</span>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+          `}
+          
+          <div class="mb-4 p-4 rounded-2xl bg-white/5 border border-white/10">
+            <div class="text-white/70 mb-3">Players (${players.length}/4)</div>
+            <div class="space-y-2">
+              ${players.map((p,i)=>`<div class="flex items-center gap-3 p-3 rounded-xl bg-white/5"><div class="w-10 h-10 rounded-full flex items-center justify-center font-bold ${i===dealerIndex?'bg-amber-400 text-black':'bg-indigo-500 text-white'}">${i===dealerIndex?'🎲':i+1}</div><span class="text-white">${p.name}</span>${i===dealerIndex?'<span class="text-amber-400 text-xs">Dealer</span>':''}${p.id===state.myId?'<span class="ml-auto text-emerald-400 text-sm">(You)</span>':''}</div>`).join('')}
+              ${Array(4-players.length).fill(0).map(()=>`<div class="flex items-center gap-3 p-3 rounded-xl bg-white/5 border border-dashed border-white/10"><div class="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white/30">?</div><span class="text-white/30">Waiting...</span></div>`).join('')}
+            </div>
+          </div>
+          ${isHost ? 
+            `<button onclick="startGame()" ${canStart?'':'disabled'} class="w-full py-4 rounded-xl font-bold text-lg ${canStart?'bg-gradient-to-r from-emerald-400 to-cyan-500 text-black hover:from-emerald-300':'bg-white/10 text-white/30 cursor-not-allowed'}">${canStart?'Start Game':'Need 2+ players'}</button>` 
+            : 
+            `<div class="w-full py-4 rounded-xl bg-white/5 text-center text-white/50">Waiting for host to start...</div>`
+          }
+        </div>
+      </div>`;
+    return;
+  }
+  
+  // PLAYING / FINISHED
+  if(currentPhase === 'playing' || currentPhase === 'finished') {
+    console.log('Rendering PLAYING/FINISHED - phase:', currentPhase, 'isMyTurn:', isMyTurn);
+    const currentPlayer = players.find(p=>p.id===currentId);
+    const myFlipped = me?.flippedCards || [];
+    const myHidden = me?.hiddenCards || [];
+    const myBest = myFlipped.length > 0 ? findBestHand(myFlipped) : null;
+    const beatsTarget = myFlipped.length > 0 && g.targetHand && beatsPreviousHand(myFlipped, g.targetHand);
+    const winner = players.find(p=>p.id===g.winner);
+    const scores = g.scores || {};
+    
+    app.innerHTML = `
+      ${currentPhase==='finished'?`<div class="fixed inset-0 bg-black/80 flex items-center justify-center z-50"><div class="bg-slate-800 p-8 rounded-3xl border border-amber-400/30 max-w-md w-full mx-4 text-center"><div class="text-6xl mb-4">🏆</div><h2 class="text-3xl font-bold text-white mb-2">Game Over!</h2><p class="text-xl text-amber-400 mb-4">${winner?.name||'Winner'} wins!</p><p class="text-4xl font-bold text-emerald-400 mb-6">+$${g.pot}</p><div class="mb-6 p-3 rounded-xl bg-white/5"><div class="text-white/70 text-sm mb-2">Scoreboard</div>${players.map(p=>`<div class="flex justify-between py-1"><span class="text-white">${p.name}</span><span class="text-amber-400 font-bold">$${scores[p.id]||0}</span></div>`).join('')}</div><button onclick="doPlayAgain()" class="px-8 py-3 rounded-xl bg-gradient-to-r from-amber-400 to-orange-500 text-black font-bold">Play Again</button></div></div>`:''}
+      <div class="min-h-screen p-4">
+        <div class="max-w-4xl mx-auto">
+          <div class="flex justify-between items-center mb-4">
+            <div class="flex items-center gap-3"><span class="text-white/50 text-sm">Room: <span class="text-amber-400 font-mono">${state.roomCode}</span></span><div class="flex gap-1">${(g.diceRoll?.dice||[]).map(v=>`<div class="w-6 h-6 bg-white rounded text-xs flex items-center justify-center font-bold">${v}</div>`).join('')}</div></div>
+            <div class="text-amber-400 font-bold text-xl">Pot: $${g.pot}</div>
+          </div>
+          
+          <!-- Scoreboard -->
+          <div class="mb-4 p-3 rounded-xl bg-white/5 border border-white/10">
+            <div class="flex justify-between items-center">
+              <span class="text-white/50 text-sm">Scores:</span>
+              <div class="flex gap-4">
+                ${players.map(p=>`<span class="text-sm"><span class="text-white/70">${p.name}:</span> <span class="text-amber-400 font-bold">$${scores[p.id]||0}</span></span>`).join('')}
+              </div>
+            </div>
+          </div>
+          
+          <div class="mb-4 p-4 rounded-2xl bg-gradient-to-r from-amber-500/20 to-orange-500/20 border-2 border-amber-400/50">
+            <div class="flex justify-between mb-2"><span class="text-sm text-white/70">Target (${g.targetSetBy})</span><span class="px-3 py-1 rounded-full text-xs font-bold bg-amber-400 text-amber-900">${g.targetHand?.name||'N/A'}</span></div>
+            <div class="flex gap-2 flex-wrap">${(g.targetHand?.cards||[]).map(c=>renderCard(c,true)).join('')}</div>
+          </div>
+          
+          ${currentPlayer&&!currentPlayer.isEliminated&&currentPhase==='playing'?`<div class="mb-4 p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/30 text-center"><span class="text-emerald-400 font-bold">${isMyTurn?'🎯 Your Turn!':`⏳ ${currentPlayer.name}'s Turn`}</span></div>`:''}
+          
+          <div class="grid md:grid-cols-2 gap-4 mb-4">
+            ${players.map(p=>{
+              const isCurr=currentId===p.id, isMe=p.id===state.myId, isDlr=dealerId===p.id;
+              const pFlipped=p.flippedCards||[], pBest=pFlipped.length>0?findBestHand(pFlipped):null;
+              return `<div class="p-4 rounded-2xl ${p.isEliminated?'bg-red-900/30 border border-red-500/30 opacity-60':isCurr?'bg-gradient-to-r from-emerald-500/30 to-cyan-500/30 border-2 border-emerald-400 pulse-glow':'bg-white/5 border border-white/10'}">
+                <div class="flex justify-between mb-3">
+                  <div class="flex items-center gap-2">
+                    <div class="w-10 h-10 rounded-full flex items-center justify-center ${p.isEliminated?'bg-red-500/50':isCurr?'bg-emerald-400':'bg-indigo-500'}">${p.isEliminated?'💀':isDlr?'🎲':isMe?'👤':'🎮'}</div>
+                    <div><span class="font-bold text-white">${p.name}${isMe?' (You)':''}${isDlr?' 👑':''}</span>${isCurr&&!p.isEliminated?'<span class="ml-2 text-emerald-400 text-sm">● Playing</span>':''}${p.isEliminated?'<span class="ml-2 text-red-400 text-sm">Out</span>':''}</div>
+                  </div>
+                  <div class="text-right"><div class="text-white/50 text-xs">Hidden</div><div class="text-white font-bold">${p.hiddenCount||0}</div></div>
+                </div>
+                ${pFlipped.length>0?`<div class="mt-2"><div class="flex items-center gap-2 mb-2"><span class="text-xs text-white/50">Flipped:</span><span class="px-2 py-0.5 rounded text-xs bg-blue-500 text-white">${pBest?.name||'N/A'}</span></div><div class="flex gap-1 flex-wrap">${pFlipped.map(c=>renderCard(c,true)).join('')}</div></div>`:''}
+              </div>`;
+            }).join('')}
+          </div>
+          
+          ${me&&!me.isEliminated&&myHidden.length>0?`<div class="mb-4 p-4 rounded-2xl bg-indigo-500/20 border border-indigo-400/30"><h3 class="text-white/70 text-sm mb-3">Your Hidden (${myHidden.length})</h3><div class="flex gap-2 flex-wrap">${myHidden.map(c=>renderCard(c,true,true)).join('')}</div></div>`:''}
+          
+          ${isMyTurn&&!me?.isEliminated&&currentPhase==='playing'&&!beatsTarget?renderHelpfulCards(myFlipped, g.targetHand, g):''}
+          
+          ${isMyTurn&&!me?.isEliminated&&currentPhase==='playing'?`<div class="flex gap-4 justify-center mb-4">
+            <button onclick="doFlipCard()" ${(me?.hiddenCount||0)===0?'disabled':''} class="px-8 py-4 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-600 text-white font-bold text-lg disabled:opacity-50">🎴 Flip Card</button>
+          </div>`:''}
+          
+          ${isMyTurn&&!me?.isEliminated&&currentPhase==='playing'&&beatsTarget?`<div class="text-center text-emerald-400 font-bold mb-4">✅ You beat the target! Waiting for next player...</div>`:''}
+          
+          <div class="p-4 rounded-2xl bg-white/5 border border-white/10">
+            <h3 class="text-white/50 text-sm mb-2">History</h3>
+            <div class="max-h-32 overflow-y-auto space-y-1 text-sm text-white/60">
+              ${(g.history||[]).slice().reverse().map(h=>`<div>${h.type==='dice'?`🎲 ${h.name} rolled ${h.dice.join('+')}=${h.total}`:h.type==='initial'?`🎴 Initial: ${h.card?.rank||'?'}${h.card?.suit||'?'}`:h.type==='beat'?`✅ ${h.name} beats with ${h.hand}`:h.type==='eliminated'?`❌ ${h.name} out`:h.type==='winner'?`🏆 ${h.name} wins $${h.pot}!`:''}</div>`).join('')}
+            </div>
+          </div>
+        </div>
+      </div>`;
+    return;
+  }
+  
+  // FALLBACK - unknown phase
+  console.log('Unknown phase:', currentPhase);
+  app.innerHTML = `<div class="min-h-screen flex items-center justify-center"><div class="text-white text-center"><p class="text-2xl mb-4">Loading...</p><p class="text-white/50">Phase: ${currentPhase}</p></div></div>`;
+}
+
+render();
+</script>
+</body>
+</html>
